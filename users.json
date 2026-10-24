@@ -1,0 +1,10 @@
+{
+  "doctor": {
+    "salt": "6cc609b8b5b7e8aee6122338604d804e",
+    "password_hash": "468a37f9547328da825f42f17adab126b6b996d1157d6de22ae1a6f3512b67a6"
+  },
+  "111": {
+    "salt": "96294f7d9cf1ba8881b280306665c348",
+    "password_hash": "9494045d1631e0dda1aa82164159ce008cfb86b48e9cb71166b4b91d3cbd9a6b"
+  }
+}

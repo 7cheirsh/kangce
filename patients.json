@@ -1,0 +1,13 @@
+{
+  "doctor": [
+    {
+      "name": "小红",
+      "gender": "男",
+      "age": 30,
+      "affected": "右侧",
+      "diagnosis": "右侧骨折",
+      "id": "674f423ed9df",
+      "created_at": "2026-10-24 21:59:17"
+    }
+  ]
+}

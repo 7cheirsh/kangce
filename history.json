@@ -1,0 +1,42 @@
+[
+  {
+    "user": "doctor",
+    "patient_id": "674f423ed9df",
+    "patient_name": "小红",
+    "time": "2026-10-24 22:02:55",
+    "side": "右侧",
+    "mode": "拍照",
+    "angle": 128.8,
+    "level": "正常"
+  },
+  {
+    "user": "doctor",
+    "patient_id": "674f423ed9df",
+    "patient_name": "小红",
+    "time": "2026-10-24 22:12:10",
+    "side": "右侧",
+    "mode": "拍照",
+    "angle": 162.1,
+    "level": "超过上限"
+  },
+  {
+    "user": "doctor",
+    "patient_id": "674f423ed9df",
+    "patient_name": "小红",
+    "time": "2026-10-24 22:21:50",
+    "side": "右侧",
+    "mode": "拍照",
+    "angle": 163.3,
+    "level": "超过上限"
+  },
+  {
+    "user": "doctor",
+    "patient_id": "674f423ed9df",
+    "patient_name": "小红",
+    "time": "2026-10-24 22:27:55",
+    "side": "右侧",
+    "mode": "拍照",
+    "angle": 24.9,
+    "level": "明显受限"
+  }
+]
