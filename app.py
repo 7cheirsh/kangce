@@ -13,7 +13,7 @@ import pandas as pd
 import plotly.graph_objects as go
 
 # ===================== 页面基础配置 =====================
-st.set_page_config(page_title="康测 - 关节活动度居家自测", layout="centered")
+st.set_page_config(page_title="康测 - 居家康复与运动监测系统", layout="centered")
 
 # ===================== 深蓝色主题 CSS =====================
 DARK_BLUE_CSS = """
@@ -100,7 +100,7 @@ def register_user(username: str, password: str) -> tuple:
     save_users(users)
     return True, "注册成功，请登录"
 
-# ===================== 患者存储 =====================
+# ===================== 用户资料存储 =====================
 def load_patients() -> dict:
     if not os.path.exists(PATIENTS_FILE):
         return {}
@@ -114,22 +114,22 @@ def save_patients(data: dict):
     with open(PATIENTS_FILE, "w", encoding="utf-8") as f:
         json.dump(data, f, ensure_ascii=False, indent=2)
 
-def get_user_patients(username: str) -> list:
+def get_user_profiles(username: str) -> list:
     return load_patients().get(username, [])
 
-def add_patient(username: str, patient: dict) -> dict:
+def add_profile(username: str, profile: dict) -> dict:
     data = load_patients()
-    patients = data.get(username, [])
-    patient["id"] = secrets.token_hex(6)
-    patient["created_at"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-    patients.append(patient)
-    data[username] = patients
+    profiles = data.get(username, [])
+    profile["id"] = secrets.token_hex(6)
+    profile["created_at"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    profiles.append(profile)
+    data[username] = profiles
     save_patients(data)
-    return patient
+    return profile
 
-def delete_patient(username: str, patient_id: str):
+def delete_profile(username: str, profile_id: str):
     data = load_patients()
-    data[username] = [p for p in data.get(username, []) if p["id"] != patient_id]
+    data[username] = [p for p in data.get(username, []) if p["id"] != profile_id]
     save_patients(data)
 
 # ===================== 历史记录存储 =====================
@@ -146,24 +146,26 @@ def save_history(records: list):
     with open(HISTORY_FILE, "w", encoding="utf-8") as f:
         json.dump(records, f, ensure_ascii=False, indent=2)
 
-def add_history(username: str, patient: dict, side: str, mode: str, angle: float, level: str):
+def add_history(username: str, profile: dict, joint: str, mode: str, angle: float = 0, count: int = 0, level: str = "正常", exercise_type: str = ""):
     records = load_history()
     records.append({
         "user": username,
-        "patient_id": patient["id"],
-        "patient_name": patient["name"],
+        "patient_id": profile["id"],
+        "patient_name": profile["name"],
         "time": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-        "side": "右侧" if side == "right" else "左侧",
+        "joint": joint,
         "mode": mode,
         "angle": angle,
+        "count": count,
         "level": level,
+        "exercise_type": exercise_type
     })
     save_history(records)
 
-def patient_history(username: str, patient_id: str) -> list:
+def profile_history(username: str, profile_id: str) -> list:
     return [
         r for r in load_history()
-        if r.get("user") == username and r.get("patient_id") == patient_id
+        if r.get("user") == username and r.get("patient_id") == profile_id
     ]
 
 # ===================== 业务常量与图像处理 =====================
@@ -210,10 +212,28 @@ def get_upper_limb_points(landmarks, img_w, img_h, side="right"):
         pts["wrist"]    = [int(landmarks[15].x * img_w), int(landmarks[15].y * img_h)]
     return pts
 
+def get_lower_limb_points(landmarks, img_w, img_h, side="right"):
+    pts = {}
+    if side == "right":
+        pts["hip"]   = [int(landmarks[24].x * img_w), int(landmarks[24].y * img_h)]
+        pts["knee"]  = [int(landmarks[26].x * img_w), int(landmarks[26].y * img_h)]
+        pts["ankle"] = [int(landmarks[28].x * img_w), int(landmarks[28].y * img_h)]
+    else:
+        pts["hip"]   = [int(landmarks[23].x * img_w), int(landmarks[23].y * img_h)]
+        pts["knee"]  = [int(landmarks[25].x * img_w), int(landmarks[25].y * img_h)]
+        pts["ankle"] = [int(landmarks[27].x * img_w), int(landmarks[27].y * img_h)]
+    return pts
+
 def draw_single_arm(frame, pts):
     cv2.line(frame, pts["shoulder"], pts["elbow"], (128, 0, 255), 3)
     cv2.line(frame, pts["elbow"], pts["wrist"], (128, 0, 255), 3)
     for k in ("shoulder", "elbow", "wrist"):
+        cv2.circle(frame, pts[k], 6, (255, 255, 255), -1)
+
+def draw_single_leg(frame, pts):
+    cv2.line(frame, pts["hip"], pts["knee"], (128, 0, 255), 3)
+    cv2.line(frame, pts["knee"], pts["ankle"], (128, 0, 255), 3)
+    for k in ("hip", "knee", "ankle"):
         cv2.circle(frame, pts[k], 6, (255, 255, 255), -1)
 
 def status_of(angle):
@@ -225,17 +245,25 @@ def status_of(angle):
         return "⚠️ 轻度屈曲受限", (0, 165, 255), "warning", "轻度受限"
     return "❗ 明显屈曲受限", (0, 0, 255), "error", "明显受限"
 
-# ===================== 视频处理器 =====================
+# ===================== 核心视频处理器 =====================
 class RealTimeProcessor(VideoProcessorBase):
-    def __init__(self, selected_side):
+    def __init__(self, mode, selected_side="left"):
         self.pose = mp.solutions.pose.Pose(
             static_image_mode=False,
             min_detection_confidence=0.5,
             min_tracking_confidence=0.5,
         )
+        self.mode = mode # "elbow", "knee", "pushup", "squat"
         self.side = selected_side
         self.current_angle = 0.0
         self.max_angle = 0.0
+        self.counter = 0
+        self.stage = None
+        
+        self.mp_drawing = mp.solutions.drawing_utils
+        self.mp_pose = mp.solutions.pose
+        self.landmark_style = self.mp_drawing.DrawingSpec(color=(255, 255, 255), thickness=2, circle_radius=3)
+        self.connection_style = self.mp_drawing.DrawingSpec(color=(0, 0, 255), thickness=3)
 
     def recv(self, frame):
         img = frame.to_ndarray(format="bgr24")
@@ -245,33 +273,95 @@ class RealTimeProcessor(VideoProcessorBase):
         results = self.pose.process(rgb)
 
         if results.pose_landmarks:
-            pts = get_upper_limb_points(results.pose_landmarks.landmark, img_w, img_h, self.side)
+            landmarks = results.pose_landmarks.landmark
             
-            # 算出几何内角（伸直≈180，弯曲≈小角度）
-            raw_angle = calculate_raw_angle(pts["shoulder"], pts["elbow"], pts["wrist"])
-            
-            # 算出真正的屈肘角度（伸直≈0，弯曲≈大角度）
-            self.current_angle = raw_to_flexion(raw_angle)
-            
-            if self.current_angle > self.max_angle:
-                self.max_angle = self.current_angle
+            # 1. 肘关节康复
+            if self.mode == "elbow":
+                pts = get_upper_limb_points(landmarks, img_w, img_h, self.side)
+                raw_angle = calculate_raw_angle(pts["shoulder"], pts["elbow"], pts["wrist"])
+                self.current_angle = raw_to_flexion(raw_angle)
+                if self.current_angle > self.max_angle: self.max_angle = self.current_angle
 
-            draw_single_arm(img, pts)
-            
-            # 🔴 在肘部直接绘制“屈伸角”（小角度），用显眼的红色
-            cv2.putText(img, f"{self.current_angle}°",
-                        (pts["elbow"][0] + 15, pts["elbow"][1] - 15),
-                        cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 0, 255), 2)
-                        
-            # 左上角实时数据
-            cv2.putText(img, f"当前: {self.current_angle}°", (20, 40),
-                        cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 0), 2)
-            cv2.putText(img, f"最大值: {self.max_angle}°", (20, 80),
-                        cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 0), 2)
-            
-            text, color, _, _ = status_of(self.current_angle)
-            cv2.putText(img, text, (20, 130),
-                        cv2.FONT_HERSHEY_SIMPLEX, 0.7, color, 2)
+                draw_single_arm(img, pts)
+                cv2.putText(img, f"{self.current_angle}°", (pts["elbow"][0] + 15, pts["elbow"][1] - 15), cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 0, 255), 2)
+                cv2.putText(img, f"当前: {self.current_angle}°", (20, 40), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 0), 2)
+                cv2.putText(img, f"最大值: {self.max_angle}°", (20, 80), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 0), 2)
+                text, color, _, _ = status_of(self.current_angle)
+                cv2.putText(img, text, (20, 130), cv2.FONT_HERSHEY_SIMPLEX, 0.7, color, 2)
+
+            # 2. 膝关节康复
+            elif self.mode == "knee":
+                pts = get_lower_limb_points(landmarks, img_w, img_h, self.side)
+                raw_angle = calculate_raw_angle(pts["hip"], pts["knee"], pts["ankle"])
+                self.current_angle = raw_to_flexion(raw_angle)
+                if self.current_angle > self.max_angle: self.max_angle = self.current_angle
+
+                draw_single_leg(img, pts)
+                cv2.putText(img, f"{self.current_angle}°", (pts["knee"][0] + 15, pts["knee"][1] - 15), cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 0, 255), 2)
+                cv2.putText(img, f"当前: {self.current_angle}°", (20, 40), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 0), 2)
+                cv2.putText(img, f"最大值: {self.max_angle}°", (20, 80), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 0), 2)
+                text, color, _, _ = status_of(self.current_angle)
+                cv2.putText(img, text, (20, 130), cv2.FONT_HERSHEY_SIMPLEX, 0.7, color, 2)
+
+            # 3. 日常运动：俯卧撑 (侧身)
+            elif self.mode == "pushup":
+                def get_pt(idx): return [int(landmarks[idx].x * img_w), int(landmarks[idx].y * img_h)]
+                shoulder, elbow, wrist = get_pt(11), get_pt(13), get_pt(15)
+                hip, ankle = get_pt(23), get_pt(27)
+                
+                elbow_angle = calculate_raw_angle(shoulder, elbow, wrist)
+                body_angle = calculate_raw_angle(shoulder, hip, ankle)
+                
+                if elbow_angle > 160: self.stage = "UP"
+                if elbow_angle < 90 and self.stage == "UP":
+                    self.stage = "DOWN"
+                    self.counter += 1
+
+                cv2.rectangle(img, (0, 0), (250, 80), (245, 117, 16), -1)
+                cv2.putText(img, 'REPS', (15, 20), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0,0,0), 1)
+                cv2.putText(img, str(self.counter), (10, 70), cv2.FONT_HERSHEY_SIMPLEX, 2, (255,255,255), 2)
+                cv2.putText(img, 'STAGE', (110, 20), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0,0,0), 1)
+                if self.stage: cv2.putText(img, self.stage, (105, 70), cv2.FONT_HERSHEY_SIMPLEX, 1.5, (255,255,255), 2)
+
+                if body_angle < 150 or body_angle > 195:
+                    cv2.putText(img, "WARNING: Keep body straight!", (10, 110), cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 0, 255), 2)
+
+            # 4. 日常运动：深蹲 (正面)
+            elif self.mode == "squat":
+                def get_pt(idx): return [int(landmarks[idx].x * img_w), int(landmarks[idx].y * img_h)]
+                l_shoulder, r_shoulder = get_pt(11), get_pt(12)
+                l_hip, r_hip = get_pt(23), get_pt(24)
+                l_knee, r_knee = get_pt(25), get_pt(26)
+                l_ankle, r_ankle = get_pt(27), get_pt(28)
+
+                knee_angle = calculate_raw_angle(l_hip, l_knee, l_ankle)
+                knee_dist = abs(l_knee[0] - r_knee[0])
+                ankle_dist = abs(l_ankle[0] - r_ankle[0])
+
+                if knee_angle > 160: self.stage = "UP"
+                if knee_angle < 110 and self.stage == "UP":
+                    self.stage = "DOWN"
+                    self.counter += 1
+
+                cv2.rectangle(img, (0, 0), (280, 80), (50, 150, 50), -1)
+                cv2.putText(img, 'SQUATS', (15, 20), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255,255,255), 1)
+                cv2.putText(img, str(self.counter), (10, 70), cv2.FONT_HERSHEY_SIMPLEX, 2, (255,255,255), 2)
+                cv2.putText(img, 'STAGE', (130, 20), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255,255,255), 1)
+                if self.stage: cv2.putText(img, self.stage, (125, 70), cv2.FONT_HERSHEY_SIMPLEX, 1.5, (255,255,255), 2)
+                
+                if self.stage == "DOWN" and knee_dist < (ankle_dist * 0.8):
+                     cv2.putText(img, "WARNING: Knees caving in!", (10, 110), cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 0, 255), 2)
+                elif self.stage == "DOWN" and knee_angle > 130:
+                     cv2.putText(img, "Go deeper!", (10, 110), cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 165, 255), 2)
+
+            # 统一绘制全身骨架
+            self.mp_drawing.draw_landmarks(
+                img, 
+                results.pose_landmarks, 
+                self.mp_pose.POSE_CONNECTIONS,
+                landmark_drawing_spec=self.landmark_style,
+                connection_drawing_spec=self.connection_style
+            )
 
         return frame.from_ndarray(img, format="bgr24")
 
@@ -285,8 +375,8 @@ class RealTimeProcessor(VideoProcessorBase):
 def login_page():
     st.markdown("""
     <div class="hero">
-        <h1>康测 · 关节活动度居家自测系统</h1>
-        <p>肘关节屈曲角度测量 · 居家康复初筛参考</p>
+        <h1>康测 · 居家康复与运动监测系统</h1>
+        <p>关节活动度评估 · 日常运动姿态纠错</p>
     </div>
     """, unsafe_allow_html=True)
 
@@ -302,7 +392,7 @@ def login_page():
                 if verify_user(username, password):
                     st.session_state.logged_in = True
                     st.session_state.username = username
-                    st.session_state.page = "👤 患者信息"
+                    st.session_state.page = "👤 用户信息"
                     st.rerun()
                 else:
                     st.error("用户名或密码错误")
@@ -320,39 +410,39 @@ def login_page():
                         st.error(msg)
         st.markdown('</div>', unsafe_allow_html=True)
 
-# ===================== 患者信息页 =====================
+# ===================== 用户信息页 =====================
 def patient_page():
     st.markdown(f"""
     <div class="hero">
-        <h1>患者基本信息</h1>
-        <p>账号：{st.session_state.username}　|　信息用于关联测量记录</p>
+        <h1>用户基本信息</h1>
+        <p>账号：{st.session_state.username}　|　信息用于关联测量与运动记录</p>
     </div>
     """, unsafe_allow_html=True)
 
-    patients = get_user_patients(st.session_state.username)
+    profiles = get_user_profiles(st.session_state.username)
 
-    if patients:
-        st.subheader("选择患者")
-        options = {f"{p['name']}（{p.get('gender','')} / {p.get('age','')}岁）": p for p in patients}
-        choice = st.selectbox("当前测量的患者", list(options.keys()))
+    if profiles:
+        st.subheader("选择用户")
+        options = {f"{p['name']}（{p.get('gender','')} / {p.get('age','')}岁）": p for p in profiles}
+        choice = st.selectbox("当前操作的用户", list(options.keys()))
         selected = options[choice]
 
         col1, col2 = st.columns(2)
         with col1:
-            if st.button("✅ 进入测量", use_container_width=True):
+            if st.button("✅ 选定该用户并进入", use_container_width=True):
                 st.session_state.current_patient = selected
-                st.session_state.page = "📐 测量"
+                st.session_state.page = "📐 康复测量"
                 st.rerun()
         with col2:
-            if st.button("🗑️ 删除该患者", use_container_width=True):
-                delete_patient(st.session_state.username, selected["id"])
+            if st.button("🗑️ 删除该用户", use_container_width=True):
+                delete_profile(st.session_state.username, selected["id"])
                 if st.session_state.get("current_patient", {}).get("id") == selected["id"]:
                     st.session_state.pop("current_patient", None)
                 st.success("已删除")
                 st.rerun()
         st.markdown("---")
 
-    st.subheader("新增患者" if patients else "请填写患者基本信息")
+    st.subheader("新增用户" if profiles else "请填写用户基本信息")
     with st.form("patient_form", clear_on_submit=True):
         name = st.text_input("姓名 *")
         c1, c2, c3 = st.columns(3)
@@ -361,29 +451,30 @@ def patient_page():
         with c2:
             age = st.number_input("年龄", min_value=0, max_value=120, value=30, step=1)
         with c3:
-            affected = st.selectbox("患侧", ["右侧", "左侧", "双侧"])
-        diagnosis = st.text_input("诊断 / 备注（可选）", placeholder="如：右肘骨折术后 3 个月")
-        submitted = st.form_submit_button("保存并进入测量", use_container_width=True)
+            affected = st.selectbox("患侧（选填）", ["无", "右侧", "左侧", "双侧"])
+        
+        diagnosis = st.text_input("诊断 / 备注（选填）", placeholder="如：右肘骨折术后 3 个月（普通健身可不填）")
+        submitted = st.form_submit_button("保存并进入", use_container_width=True)
 
     if submitted:
         if not name.strip():
             st.error("姓名不能为空")
         else:
-            patient = add_patient(st.session_state.username, {
+            profile = add_profile(st.session_state.username, {
                 "name": name.strip(),
                 "gender": gender,
                 "age": int(age),
                 "affected": affected,
-                "diagnosis": diagnosis.strip(),
+                "diagnosis": diagnosis.strip() if diagnosis.strip() else "无",
             })
-            st.session_state.current_patient = patient
-            st.session_state.page = "📐 测量"
-            st.success(f"已保存患者：{patient['name']}")
+            st.session_state.current_patient = profile
+            st.session_state.page = "📐 康复测量"
+            st.success(f"已保存用户：{profile['name']}")
             st.rerun()
 
-# ===================== 测量页（整合了操作引导） =====================
-def photo_mode(selected_side):
-    st.subheader("📷 拍照测量")
+# ===================== 拍照模式 =====================
+def photo_mode(selected_side, joint_type):
+    st.subheader(f"📷 拍照测量（{joint_type}）")
     photo = st.camera_input("Take a photo")
     if not photo:
         return
@@ -394,27 +485,27 @@ def photo_mode(selected_side):
     h, w = img_bgr.shape[:2]
 
     img_rgb_wb = cv2.cvtColor(img_bgr, cv2.COLOR_BGR2RGB)
-    with mp.solutions.pose.Pose(
-        static_image_mode=True, min_detection_confidence=0.5
-    ) as pose:
+    with mp.solutions.pose.Pose(static_image_mode=True, min_detection_confidence=0.5) as pose:
         res = pose.process(img_rgb_wb)
 
     if not res.pose_landmarks:
-        st.error("未识别到人体关键点，请摆正姿势，上半身完整入镜")
+        st.error("未识别到人体关键点，请摆正姿势，完整入镜")
         return
 
-    pts = get_upper_limb_points(res.pose_landmarks.landmark, w, h, selected_side)
-    raw_angle = calculate_raw_angle(pts["shoulder"], pts["elbow"], pts["wrist"])
-    
-    # 真正屈伸角
-    angle = raw_to_flexion(raw_angle)
+    if joint_type == "肘关节":
+        pts = get_upper_limb_points(res.pose_landmarks.landmark, w, h, selected_side)
+        raw_angle = calculate_raw_angle(pts["shoulder"], pts["elbow"], pts["wrist"])
+        angle = raw_to_flexion(raw_angle)
+        draw_single_arm(img_bgr, pts)
+        text_pos = (pts["elbow"][0] + 15, pts["elbow"][1] - 15)
+    else:
+        pts = get_lower_limb_points(res.pose_landmarks.landmark, w, h, selected_side)
+        raw_angle = calculate_raw_angle(pts["hip"], pts["knee"], pts["ankle"])
+        angle = raw_to_flexion(raw_angle)
+        draw_single_leg(img_bgr, pts)
+        text_pos = (pts["knee"][0] + 15, pts["knee"][1] - 15)
 
-    draw_single_arm(img_bgr, pts)
-    
-    # 🔴 在肘部用红色小角度标注
-    cv2.putText(img_bgr, f"{angle}°",
-                (pts["elbow"][0] + 15, pts["elbow"][1] - 15),
-                cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 0, 255), 2)
+    cv2.putText(img_bgr, f"{angle}°", text_pos, cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 0, 255), 2)
 
     img_show = cv2.cvtColor(cv2.flip(img_bgr, 1), cv2.COLOR_BGR2RGB)
     st.image(img_show, caption="识别结果（镜像预览）", use_container_width=True)
@@ -428,25 +519,27 @@ def photo_mode(selected_side):
     photo_key = hashlib.md5(photo.getvalue()).hexdigest()
     if st.session_state.get("last_photo_key") != photo_key:
         add_history(st.session_state.username, st.session_state.current_patient,
-                    selected_side, "拍照", angle, level_cn)
+                    joint_type, "拍照", angle=angle, count=0, level=level_cn, exercise_type="")
         st.session_state.last_photo_key = photo_key
         st.caption("✅ 已自动保存本次测量到历史记录")
 
+# ===================== 视频实时模式 =====================
+def video_mode(selected_side, joint_type):
+    st.subheader(f"🎥 实时动态测量（{joint_type}）")
+    st.info("活动关节，画面左上角实时显示当前/最大屈曲角度与评估状态。")
+    
+    mode_key = "elbow" if joint_type == "肘关节" else "knee"
 
-def video_mode(selected_side):
-    st.subheader("🎥 实时动态测量")
-    st.info("活动肘关节，画面左上角实时显示当前/最大屈曲角度与评估状态；本轮最大角度以画面「最大值」为准。")
-
-    if (
-        "processor" not in st.session_state
-        or getattr(st.session_state.processor, "side", None) != selected_side
-    ):
-        st.session_state.processor = RealTimeProcessor(selected_side)
-    processor = st.session_state.processor
+    if ("processor" not in st.session_state 
+        or getattr(st.session_state.processor, "mode", None) != mode_key
+        or getattr(st.session_state.processor, "side", None) != selected_side):
+        st.session_state.processor = RealTimeProcessor(mode=mode_key, selected_side=selected_side)
+    
+    current_processor = st.session_state.processor
 
     ctx = webrtc_streamer(
-        key=f"elbow-real-time-{selected_side}",
-        video_processor_factory=lambda: processor,
+        key=f"{mode_key}-real-time-{selected_side}",
+        video_processor_factory=lambda: current_processor,
         media_stream_constraints={"video": True, "audio": False},
         rtc_configuration={"iceServers": [{"urls": ["stun:stun.l.google.com:19302"]}]},
     )
@@ -454,74 +547,121 @@ def video_mode(selected_side):
     col1, col2 = st.columns(2)
     with col1:
         if st.button("🔄 重置本轮最大角度", use_container_width=True):
-            processor.max_angle = 0.0
+            current_processor.max_angle = 0.0
             st.success("最大角度已重置")
     with col2:
         if st.button("💾 保存本轮最大角度", use_container_width=True):
-            if processor.max_angle <= 0:
+            if current_processor.max_angle <= 0:
                 st.warning("当前最大角度为 0，尚未测到有效数据")
             else:
-                _, _, _, level_cn = status_of(processor.max_angle)
+                _, _, _, level_cn = status_of(current_processor.max_angle)
                 add_history(st.session_state.username, st.session_state.current_patient,
-                            selected_side, "视频", processor.max_angle, level_cn)
-                st.success(f"已保存：{processor.max_angle}°（{level_cn}）")
+                            joint_type, "视频", angle=current_processor.max_angle, count=0, level=level_cn, exercise_type="")
+                st.success(f"已保存：{current_processor.max_angle}°（{level_cn}）")
 
     if ctx.video_processor:
         st.write(f"本轮最大屈曲角度：{ctx.video_processor.max_angle} °")
         text, _, level, _ = status_of(ctx.video_processor.max_angle)
         getattr(st, level)(text)
 
-
+# ===================== 康复测量页 =====================
 def measure_page():
-    patient = st.session_state.get("current_patient")
-    if not patient:
-        st.warning("尚未选择患者，请先填写患者基本信息")
-        if st.button("前往患者信息"):
-            st.session_state.page = "👤 患者信息"
+    profile = st.session_state.get("current_patient")
+    if not profile:
+        st.warning("尚未选择用户，请先填写用户基本信息")
+        if st.button("前往用户信息"):
+            st.session_state.page = "👤 用户信息"
             st.rerun()
         return
 
-    st.info(f"👤 当前患者：**{patient['name']}**（{patient.get('gender','')} / {patient.get('age','')}岁 / 患侧：{patient.get('affected','')}）"
-            + (f"　诊断：{patient['diagnosis']}" if patient.get('diagnosis') else ""))
-    if st.button("切换患者"):
-        st.session_state.page = "👤 患者信息"
+    st.info(f"👤 当前用户：**{profile['name']}**（{profile.get('gender','')} / {profile.get('age','')}岁 / 患侧：{profile.get('affected','')}）"
+            + (f"　诊断：{profile['diagnosis']}" if profile.get('diagnosis') else ""))
+    if st.button("切换用户"):
+        st.session_state.page = "👤 用户信息"
         st.rerun()
 
-    # 操作引导
-    first_visit_key = f"guide_seen_{st.session_state.username}"
-    show_guide = not st.session_state.get(first_visit_key, False)
-    
-    with st.expander("📖 操作引导：如何正确站立与测量（点击展开/收起）", expanded=show_guide):
+    with st.expander("📖 操作引导：如何正确站立与测量（点击展开/收起）", expanded=False):
         st.markdown("""
         **① 站立姿势**
         - **侧对摄像头站立**，身体与镜头垂直，双脚与肩同宽。
-        - **上半身完整入镜**：头顶到腰部以下都要在画面内，手臂活动不能出画。
+        - **待测部位完整入镜**：测肘关节时手臂不可出画；测膝关节时需保证髋部到脚踝完整入画。
         - 摄像头高度**与胸口齐平**，距离约 **1.5～2 米**。
-        - 待测手臂自然下垂作为起始位，测量时再缓慢弯曲。
-
+        
         **② 光线与环境**
-        - **面向光源站立，避免背光**（背光会变剪影），避免单侧强光。
-        - 避免冷暖光混用，系统已内置**自动白平衡**抵消整体偏色，但不能修复背光。
-        - 背景简洁，不要多人入镜，穿短袖避免遮挡肘部。
-
+        - **面向光源站立，避免背光**。背景简洁，穿短袖/短裤避免遮挡。
+        
         **③ 测量动作**
-        - **伸直位**：手臂自然下垂伸直，应接近 **0°**（3～5° 残余属正常）。
-        - **弯曲**：缓慢屈肘到最大角度并保持 1～2 秒。
-        - 视频模式结束后，记得点击下方的"保存本轮最大角度"。
+        - **伸直位**：自然下垂伸直，应接近 **0°**。
+        - **弯曲**：缓慢屈曲到最大角度并保持 1～2 秒。
         """)
-        if show_guide:
-            if st.button("我知道了，收起引导"):
-                st.session_state[first_visit_key] = True
-                st.rerun()
 
-    side_option = st.selectbox("请选择待测肘关节", ["右侧肘关节", "左侧肘关节"])
-    side_key = "right" if side_option == "右侧肘关节" else "left"
+    joint_option = st.selectbox("请选择待测部位", ["肘关节", "膝关节"])
+    side_option = st.selectbox("请选择待测侧别", ["右侧", "左侧"])
+    side_key = "right" if side_option == "右侧" else "left"
 
     tab1, tab2 = st.tabs(["📷 拍照模式", "🎥 实时视频模式"])
     with tab1:
-        photo_mode(side_key)
+        photo_mode(side_key, joint_option)
     with tab2:
-        video_mode(side_key)
+        video_mode(side_key, joint_option)
+
+# ===================== 日常运动页 =====================
+def exercise_page():
+    profile = st.session_state.get("current_patient")
+    if not profile:
+        st.warning("请先前往『用户信息』选择一个用户，再进行运动记录。")
+        if st.button("前往用户信息"):
+            st.session_state.page = "👤 用户信息"
+            st.rerun()
+        return
+
+    st.markdown("""
+    <div class="hero">
+        <h1>日常居家运动监测</h1>
+        <p>AI 姿态纠错 · 自动计数 · 避免运动损伤</p>
+    </div>
+    """, unsafe_allow_html=True)
+    
+    st.info(f"👤 当前运动者：**{profile['name']}**（{profile.get('age','')}岁）。请完整露在镜头中，系统将自动为您计数并纠错。")
+    st.warning("⚠️ **免责声明**：本模块仅作为日常健身姿态参考，不能替代专业教练或医生的指导。若运动中出现疼痛，请立刻停止。")
+
+    exercise_choice = st.selectbox("请选择运动项目", ["俯卧撑 (Push-up)", "深蹲 (Squat)"])
+    mode_key = "pushup" if "俯卧撑" in exercise_choice else "squat"
+    ex_name = "俯卧撑" if mode_key == "pushup" else "深蹲"
+
+    if ("processor" not in st.session_state 
+        or getattr(st.session_state.processor, "mode", None) != mode_key):
+        st.session_state.processor = RealTimeProcessor(mode=mode_key)
+    
+    current_processor = st.session_state.processor
+
+    ctx = webrtc_streamer(
+        key=f"{mode_key}-real-time",
+        video_processor_factory=lambda: current_processor,
+        media_stream_constraints={"video": True, "audio": False},
+        rtc_configuration={"iceServers": [{"urls": ["stun:stun.l.google.com:19302"]}]},
+    )
+
+    st.markdown("---")
+    st.subheader("📝 运动记录保存")
+    col1, col2 = st.columns(2)
+    
+    with col1:
+        if st.button("🔄 重置当前计数", use_container_width=True):
+            current_processor.counter = 0
+            current_processor.stage = None
+            st.success("当前计数已归零")
+    
+    with col2:
+        if st.button("💾 结束并保存记录", use_container_width=True):
+            if current_processor.counter <= 0:
+                st.warning("当前次数为 0，无需保存")
+            else:
+                add_history(st.session_state.username, st.session_state.current_patient,
+                            joint="无", mode=ex_name, angle=0, count=current_processor.counter, level="正常", exercise_type=ex_name)
+                st.success(f"✅ 成功保存！本次做了 {current_processor.counter} 个{ex_name}")
+                current_processor.counter = 0 
+                current_processor.stage = None
 
 # ===================== 趋势图 =====================
 def render_trend_chart(df: pd.DataFrame):
@@ -533,24 +673,29 @@ def render_trend_chart(df: pd.DataFrame):
     chart_df = chart_df.sort_values("时间_dt")
 
     fig = go.Figure()
-    for side, color in [("右侧", "#1c4a86"), ("左侧", "#e07b00")]:
-        sub = chart_df[chart_df["侧别"] == side]
-        if sub.empty:
-            continue
+    
+    sub_right = chart_df[chart_df["侧别"] == "右侧"] if "侧别" in chart_df.columns else pd.DataFrame()
+    if not sub_right.empty:
         fig.add_trace(go.Scatter(
-            x=sub["时间_dt"],
-            y=sub["屈曲角度(°)"],
-            mode="lines+markers",
-            name=f"{side}肘",
-            line=dict(color=color, width=2.5),
+            x=sub_right["时间_dt"], y=sub_right["屈曲角度(°)"],
+            mode="lines+markers", name="右侧",
+            line=dict(color="#1c4a86", width=2.5),
             marker=dict(size=8, line=dict(color="white", width=1)),
             hovertemplate="%{x|%Y-%m-%d %H:%M}<br>角度：%{y:.1f}°<extra></extra>",
         ))
 
-    fig.add_hline(y=120, line_dash="dash", line_color="#2e9e5b",
-                  annotation_text="正常下限 120°", annotation_position="top left")
-    fig.add_hline(y=150, line_dash="dot", line_color="#c9a400",
-                  annotation_text="参考上限 150°", annotation_position="bottom left")
+    sub_left = chart_df[chart_df["侧别"] == "左侧"] if "侧别" in chart_df.columns else pd.DataFrame()
+    if not sub_left.empty:
+        fig.add_trace(go.Scatter(
+            x=sub_left["时间_dt"], y=sub_left["屈曲角度(°)"],
+            mode="lines+markers", name="左侧",
+            line=dict(color="#e07b00", width=2.5),
+            marker=dict(size=8, line=dict(color="white", width=1)),
+            hovertemplate="%{x|%Y-%m-%d %H:%M}<br>角度：%{y:.1f}°<extra></extra>",
+        ))
+
+    fig.add_hline(y=120, line_dash="dash", line_color="#2e9e5b", annotation_text="正常下限 120°", annotation_position="top left")
+    fig.add_hline(y=150, line_dash="dot", line_color="#c9a400", annotation_text="参考上限 150°", annotation_position="bottom left")
 
     fig.update_layout(
         title="康复趋势 · 屈曲角度变化",
@@ -566,73 +711,90 @@ def render_trend_chart(df: pd.DataFrame):
 
 # ===================== 历史记录页 =====================
 def history_page():
-    patient = st.session_state.get("current_patient")
-    if not patient:
-        st.warning("请先选择患者")
-        if st.button("前往患者信息"):
-            st.session_state.page = "👤 患者信息"
+    profile = st.session_state.get("current_patient")
+    if not profile:
+        st.warning("请先前往『用户信息』选择用户")
+        if st.button("前往用户信息"):
+            st.session_state.page = "👤 用户信息"
             st.rerun()
         return
 
     st.markdown(f"""
     <div class="hero">
-        <h1>历史测量记录</h1>
-        <p>患者：{patient['name']}　|　{patient.get('gender','')} / {patient.get('age','')}岁 / 患侧：{patient.get('affected','')}</p>
+        <h1>历史测量与运动记录</h1>
+        <p>用户：{profile['name']}　|　{profile.get('gender','')} / {profile.get('age','')}岁</p>
     </div>
     """, unsafe_allow_html=True)
 
-    records = patient_history(st.session_state.username, patient["id"])
+    records = profile_history(st.session_state.username, profile["id"])
     if not records:
-        st.info("暂无历史记录。完成一次拍照测量或保存视频测量后，记录会出现在这里。")
+        st.info("暂无历史记录。完成一次测量或运动后，记录会出现在这里。")
         return
 
     df = pd.DataFrame(records)
-    df = df[["time", "side", "mode", "angle", "level"]].rename(columns={
-        "time": "时间", "side": "侧别", "mode": "模式", "angle": "屈曲角度(°)", "level": "评估"
-    })
-    df = df.sort_values("时间", ascending=False).reset_index(drop=True)
+    if "joint" not in df.columns: df["joint"] = "肘关节"
+    if "count" not in df.columns: df["count"] = 0
 
-    render_trend_chart(df)
+    tab1, tab2 = st.tabs(["📐 关节康复记录", "🏃 运动打卡记录"])
 
-    if len(df) >= 2:
-        recent = df.sort_values("时间", ascending=False).head(5)
-        older = df.sort_values("时间", ascending=False).iloc[5:10]
-        if not older.empty:
-            delta = recent["屈曲角度(°)"].mean() - older["屈曲角度(°)"].mean()
-            if delta > 3:
-                st.success(f"📈 近期平均角度较之前提升 {delta:.1f}°，康复趋势向好")
-            elif delta < -3:
-                st.warning(f"📉 近期平均角度较之前下降 {abs(delta):.1f}°，建议关注并咨询康复师")
-            else:
-                st.info(f"➡️ 近期角度变化平稳（{delta:+.1f}°）")
+    with tab1:
+        df_angle = df[df["mode"].isin(["拍照", "视频"])].copy()
+        if df_angle.empty:
+            st.info("暂无关节康复记录")
+        else:
+            df_angle = df_angle[["time", "side", "joint", "mode", "angle", "level"]].rename(columns={
+                "time": "时间", "side": "侧别", "joint": "部位", "mode": "模式", "angle": "屈曲角度(°)", "level": "评估"
+            })
+            df_angle = df_angle.sort_values("时间", ascending=False).reset_index(drop=True)
 
-    c1, c2, c3 = st.columns(3)
-    c1.metric("记录总数", len(df))
-    c2.metric("最大角度", f"{df['屈曲角度(°)'].max():.1f}°")
-    c3.metric("最近一次", df["时间"].iloc[0][5:16])
+            st.subheader("📈 趋势分析")
+            joint_filter = st.radio("选择查看部位", ["全部", "肘关节", "膝关节"], horizontal=True)
+            chart_df = df_angle if joint_filter == "全部" else df_angle[df_angle["部位"] == joint_filter]
+            render_trend_chart(chart_df)
 
-    st.dataframe(df, use_container_width=True, hide_index=True)
+            if len(df_angle) >= 2:
+                recent = df_angle.head(5)
+                older = df_angle.iloc[5:10]
+                if not older.empty:
+                    delta = recent["屈曲角度(°)"].mean() - older["屈曲角度(°)"].mean()
+                    if delta > 3:
+                        st.success(f"📈 近期平均角度较之前提升 {delta:.1f}°，康复趋势向好")
+                    elif delta < -3:
+                        st.warning(f"📉 近期平均角度较之前下降 {abs(delta):.1f}°，建议关注")
+                    else:
+                        st.info(f"➡️ 近期角度变化平稳（{delta:+.1f}°）")
 
+            c1, c2, c3 = st.columns(3)
+            c1.metric("记录总数", len(df_angle))
+            c2.metric("最大角度", f"{df_angle['屈曲角度(°)'].max():.1f}°")
+            c3.metric("最近一次", df_angle["时间"].iloc[0][5:16])
+
+            st.dataframe(df_angle, use_container_width=True, hide_index=True)
+
+    with tab2:
+        df_ex = df[df["mode"].isin(["俯卧撑", "深蹲"])].copy()
+        if df_ex.empty:
+            st.info("暂无运动打卡记录，快去『日常运动』模块锻炼吧！")
+        else:
+            df_ex = df_ex[["time", "mode", "count"]].rename(columns={
+                "time": "时间", "mode": "运动项目", "count": "完成次数"
+            })
+            df_ex = df_ex.sort_values("时间", ascending=False).reset_index(drop=True)
+            
+            c1, c2 = st.columns(2)
+            c1.metric("累计运动组数", len(df_ex))
+            c2.metric("累计总次数", int(df_ex["完成次数"].sum()))
+            
+            st.dataframe(df_ex, use_container_width=True, hide_index=True)
+
+    st.markdown("---")
     st.download_button(
-        "⬇️ 导出 CSV",
+        "⬇️ 导出全部 CSV",
         data=df.to_csv(index=False).encode("utf-8-sig"),
-        file_name=f"history_{patient['name']}_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv",
+        file_name=f"history_{profile['name']}_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv",
         mime="text/csv",
         use_container_width=True,
     )
-
-    with st.expander("⚠️ 危险操作"):
-        if st.checkbox("我确认要清空该患者的全部历史记录"):
-            if st.button("清空该患者历史记录", use_container_width=True):
-                all_records = load_history()
-                remain = [
-                    r for r in all_records
-                    if not (r.get("user") == st.session_state.username
-                            and r.get("patient_id") == patient["id"])
-                ]
-                save_history(remain)
-                st.success("已清空该患者历史记录")
-                st.rerun()
 
 # ===================== 主入口 =====================
 if "logged_in" not in st.session_state:
@@ -640,7 +802,7 @@ if "logged_in" not in st.session_state:
 if "username" not in st.session_state:
     st.session_state.username = ""
 if "page" not in st.session_state:
-    st.session_state.page = "📐 测量"
+    st.session_state.page = "📐 康复测量"
 
 if not st.session_state.logged_in:
     login_page()
@@ -648,8 +810,8 @@ if not st.session_state.logged_in:
 
 st.markdown(f"""
 <div class="hero">
-    <h1>康测 · 肘关节居家活动度自测</h1>
-    <p>当前用户：{st.session_state.username}　|　伸直位≈0°，弯曲越多数值越大</p>
+    <h1>康测 · 一体化居家姿态监测</h1>
+    <p>当前用户：{st.session_state.username}　|　康复评估与日常运动纠错</p>
 </div>
 """, unsafe_allow_html=True)
 
@@ -662,11 +824,11 @@ with st.sidebar:
         st.session_state.pop("processor", None)
         st.session_state.pop("last_photo_key", None)
         st.session_state.pop("current_patient", None)
-        st.session_state.page = "📐 测量"
+        st.session_state.page = "📐 康复测量"
         st.rerun()
     st.markdown("---")
 
-    nav_options = ["📐 测量", "👤 患者信息", "📜 历史记录"]
+    nav_options = ["📐 康复测量", "🏃 日常运动", "👤 用户信息", "📜 历史记录"]
     page = st.radio(
         "功能导航", nav_options,
         index=nav_options.index(st.session_state.page) if st.session_state.page in nav_options else 0,
@@ -677,9 +839,11 @@ with st.sidebar:
     st.markdown("---")
     st.markdown("> 本工具仅作居家康复初筛参考，不能替代医院专业评估。")
 
-if page == "👤 患者信息":
+if page == "👤 用户信息":
     patient_page()
 elif page == "📜 历史记录":
     history_page()
+elif page == "🏃 日常运动":
+    exercise_page()
 else:
     measure_page()
