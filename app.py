@@ -11,6 +11,8 @@ import secrets
 from datetime import datetime
 import pandas as pd
 import plotly.graph_objects as go
+import urllib.request
+from pathlib import Path
 
 # ===================== 页面基础配置 =====================
 st.set_page_config(page_title="康测 - 居家康复与运动监测系统", layout="centered")
@@ -60,25 +62,12 @@ section[data-testid="stSidebar"] * { color: #e8f0fb !important; }
 st.markdown(DARK_BLUE_CSS, unsafe_allow_html=True)
 
 # ===================== 全局 WebRTC 配置 =====================
-# 增加 TCP 穿透，确保手机或跨网络下能连上
 RTC_CONFIG = {
     "iceServers": [
         {"urls": ["stun:stun.l.google.com:19302"]},
-        {
-            "urls": "turn:openrelay.metered.ca:80",
-            "username": "openrelayproject",
-            "credential": "openrelayproject",
-        },
-        {
-            "urls": "turn:openrelay.metered.ca:443",
-            "username": "openrelayproject",
-            "credential": "openrelayproject",
-        },
-        {
-            "urls": "turn:openrelay.metered.ca:443?transport=tcp",
-            "username": "openrelayproject",
-            "credential": "openrelayproject",
-        }
+        {"urls": "turn:openrelay.metered.ca:80", "username": "openrelayproject", "credential": "openrelayproject"},
+        {"urls": "turn:openrelay.metered.ca:443", "username": "openrelayproject", "credential": "openrelayproject"},
+        {"urls": "turn:openrelay.metered.ca:443?transport=tcp", "username": "openrelayproject", "credential": "openrelayproject"}
     ]
 }
 
@@ -268,16 +257,33 @@ def status_of(angle):
         return "⚠️ 轻度屈曲受限", (0, 165, 255), "warning", "轻度受限"
     return "❗ 明显屈曲受限", (0, 0, 255), "error", "明显受限"
 
-# ===================== 核心视频处理器 =====================
+# ===================== 核心视频处理器 (新版 Tasks API + 自动下载) =====================
 class RealTimeProcessor(VideoProcessorBase):
     def __init__(self, mode, selected_side="left"):
-        # 【性能优化 1】model_complexity=0 开启极速模型，极大加快处理速度
-        self.pose = mp.solutions.pose.Pose(
-            static_image_mode=False,
-            model_complexity=0, 
-            min_detection_confidence=0.5,
-            min_tracking_confidence=0.5,
+        # 【修复 PermissionError】将模型下载到当前工作目录，避开系统只读目录
+        model_dir = Path(os.getcwd()) / "mp_models"
+        model_dir.mkdir(exist_ok=True) 
+        model_path = model_dir / "pose_landmarker_lite.task"
+
+        # 如果模型不存在，则从官方拉取（只会在首次启动时执行一次）
+        if not model_path.exists():
+            url = "https://storage.googleapis.com/mediapipe-models/pose_landmarker/pose_landmarker_lite/float16/1/pose_landmarker_lite.task"
+            with urllib.request.urlopen(url) as response, open(model_path, 'wb') as out_file:
+                out_file.write(response.read())
+
+        # 初始化新版 Tasks API
+        BaseOptions = mp.tasks.BaseOptions
+        PoseLandmarker = mp.tasks.vision.PoseLandmarker
+        PoseLandmarkerOptions = mp.tasks.vision.PoseLandmarkerOptions
+        VisionRunningMode = mp.tasks.vision.RunningMode
+
+        options = PoseLandmarkerOptions(
+            base_options=BaseOptions(model_asset_path=str(model_path)),
+            running_mode=VisionRunningMode.VIDEO,
+            num_poses=1
         )
+        self.landmarker = PoseLandmarker.create_from_options(options)
+
         self.mode = mode
         self.side = selected_side
         self.current_angle = 0.0
@@ -287,31 +293,38 @@ class RealTimeProcessor(VideoProcessorBase):
         
         self.mp_drawing = mp.solutions.drawing_utils
         self.mp_pose = mp.solutions.pose
-        self.landmark_style = self.mp_drawing.DrawingSpec(color=(255, 255, 255), thickness=2, circle_radius=3)
-        self.connection_style = self.mp_drawing.DrawingSpec(color=(0, 0, 255), thickness=3)
 
     def recv(self, frame):
         img = frame.to_ndarray(format="bgr24")
         
-        # 【性能优化 2】将进来的画面瞬间压缩到 320x240，运算量降低 80%，告别卡顿
+        # 【性能优化】极低分辨率处理，肉眼看清骨架足够，速度翻倍
         img = cv2.resize(img, (320, 240))
         img = auto_white_balance(img)
         img_h, img_w = img.shape[:2]
-        rgb = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
-        results = self.pose.process(rgb)
+        
+        rgb_img = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
+        mp_image = mp.Image(image_format=mp.ImageFormat.SRGB, data=rgb_img)
+        frame_timestamp_ms = int(datetime.now().timestamp() * 1000)
+
+        results = self.landmarker.detect_for_video(mp_image, frame_timestamp_ms)
 
         if results.pose_landmarks:
-            landmarks = results.pose_landmarks.landmark
+            # 新版 API 返回的是一个二维数组，取第 0 个人
+            landmarks = results.pose_landmarks[0]
             
-            # 1. 肘关节康复 (修复乱码：纯英文+数字)
+            # 1. 肘关节康复
             if self.mode == "elbow":
+                def get_pt(idx): return [int(landmarks[idx].x * img_w), int(landmarks[idx].y * img_h)]
                 pts = get_upper_limb_points(landmarks, img_w, img_h, self.side)
-                raw_angle = calculate_raw_angle(pts["shoulder"], pts["elbow"], pts["wrist"])
+                # 为了兼容旧版绘图函数，这里直接使用 pts
+                shoulder, elbow, wrist = pts["shoulder"], pts["elbow"], pts["wrist"]
+
+                raw_angle = calculate_raw_angle(shoulder, elbow, wrist)
                 self.current_angle = raw_to_flexion(raw_angle)
                 if self.current_angle > self.max_angle: self.max_angle = self.current_angle
 
                 draw_single_arm(img, pts)
-                cv2.putText(img, f"{self.current_angle} deg", (pts["elbow"][0] + 15, pts["elbow"][1] - 15), cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 0, 255), 2)
+                cv2.putText(img, f"{self.current_angle} deg", (elbow[0] + 15, elbow[1] - 15), cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 0, 255), 2)
                 cv2.putText(img, f"Current: {self.current_angle} deg", (20, 40), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 0), 2)
                 cv2.putText(img, f"Max: {self.max_angle} deg", (20, 80), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 0), 2)
                 
@@ -322,12 +335,14 @@ class RealTimeProcessor(VideoProcessorBase):
             # 2. 膝关节康复
             elif self.mode == "knee":
                 pts = get_lower_limb_points(landmarks, img_w, img_h, self.side)
-                raw_angle = calculate_raw_angle(pts["hip"], pts["knee"], pts["ankle"])
+                hip, knee, ankle = pts["hip"], pts["knee"], pts["ankle"]
+
+                raw_angle = calculate_raw_angle(hip, knee, ankle)
                 self.current_angle = raw_to_flexion(raw_angle)
                 if self.current_angle > self.max_angle: self.max_angle = self.current_angle
 
                 draw_single_leg(img, pts)
-                cv2.putText(img, f"{self.current_angle} deg", (pts["knee"][0] + 15, pts["knee"][1] - 15), cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 0, 255), 2)
+                cv2.putText(img, f"{self.current_angle} deg", (knee[0] + 15, knee[1] - 15), cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 0, 255), 2)
                 cv2.putText(img, f"Current: {self.current_angle} deg", (20, 40), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 0), 2)
                 cv2.putText(img, f"Max: {self.max_angle} deg", (20, 80), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 0), 2)
                 
@@ -361,10 +376,8 @@ class RealTimeProcessor(VideoProcessorBase):
             # 4. 深蹲
             elif self.mode == "squat":
                 def get_pt(idx): return [int(landmarks[idx].x * img_w), int(landmarks[idx].y * img_h)]
-                l_shoulder, r_shoulder = get_pt(11), get_pt(12)
-                l_hip, r_hip = get_pt(23), get_pt(24)
-                l_knee, r_knee = get_pt(25), get_pt(26)
-                l_ankle, r_ankle = get_pt(27), get_pt(28)
+                l_hip, l_knee, l_ankle = get_pt(23), get_pt(25), get_pt(27)
+                r_knee, r_ankle = get_pt(26), get_pt(28)
 
                 knee_angle = calculate_raw_angle(l_hip, l_knee, l_ankle)
                 knee_dist = abs(l_knee[0] - r_knee[0])
@@ -382,25 +395,29 @@ class RealTimeProcessor(VideoProcessorBase):
                 if self.stage: cv2.putText(img, self.stage, (75, 50), cv2.FONT_HERSHEY_SIMPLEX, 1.0, (255,255,255), 2)
                 
                 if self.stage == "DOWN" and knee_dist < (ankle_dist * 0.8):
-                     cv2.putText(img, "Knees caving in!", (10, 80), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 0, 255), 2)
+                     cv2.putText(img, "Knees in!", (10, 80), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 0, 255), 2)
                 elif self.stage == "DOWN" and knee_angle > 130:
                      cv2.putText(img, "Go deeper!", (10, 80), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 165, 255), 2)
 
+            # 绘制骨架连线（兼容旧版绘制方式）
+            landmarks_proto = mp.framework.formats.landmark_pb2.LandmarkList()
+            for lm in landmarks:
+                landmark = landmarks_proto.landmark.add()
+                landmark.x, landmark.y, landmark.z, landmark.visibility = lm.x, lm.y, lm.z, lm.visibility if hasattr(lm, 'visibility') else 0
+                
             self.mp_drawing.draw_landmarks(
-                img, 
-                results.pose_landmarks, 
-                self.mp_pose.POSE_CONNECTIONS,
-                landmark_drawing_spec=self.landmark_style,
-                connection_drawing_spec=self.connection_style
+                img, landmarks_proto, self.mp_pose.POSE_CONNECTIONS,
+                landmark_drawing_spec=self.mp_drawing.DrawingSpec(color=(255, 255, 255), thickness=2, circle_radius=3),
+                connection_drawing_spec=self.mp_drawing.DrawingSpec(color=(0, 0, 255), thickness=3)
             )
 
-        # 处理完后放大回 640x480 以便前端显示清晰
+        # 放大回 640x480 以便前端显示清晰
         img = cv2.resize(img, (640, 480))
         return frame.from_ndarray(img, format="bgr24")
 
     def __del__(self):
         try:
-            self.pose.close()
+            self.landmarker.close()
         except Exception:
             pass
 
@@ -517,6 +534,7 @@ def photo_mode(selected_side, joint_type):
     img_bgr = auto_white_balance(img_bgr)
     h, w = img_bgr.shape[:2]
 
+    # 【注意】拍照模式依然使用旧版 API 以保持代码精简，因为单张照片不存在卡顿和权限问题
     img_rgb_wb = cv2.cvtColor(img_bgr, cv2.COLOR_BGR2RGB)
     with mp.solutions.pose.Pose(static_image_mode=True, model_complexity=0, min_detection_confidence=0.5) as pose:
         res = pose.process(img_rgb_wb)
@@ -573,7 +591,6 @@ def video_mode(selected_side, joint_type):
     ctx = webrtc_streamer(
         key=f"{mode_key}-real-time-{selected_side}",
         video_processor_factory=lambda: current_processor,
-        # 【性能优化 3】限制前端传输的视频分辨率为 320x240，减小网络传输负担
         media_stream_constraints={"video": {"width": 320, "height": 240}, "audio": False},
         rtc_configuration=RTC_CONFIG,
         async_processing=True
@@ -673,7 +690,6 @@ def exercise_page():
     ctx = webrtc_streamer(
         key=f"{mode_key}-real-time",
         video_processor_factory=lambda: current_processor,
-        # 【性能优化 3】限制前端传输的视频分辨率为 320x240
         media_stream_constraints={"video": {"width": 320, "height": 240}, "audio": False},
         rtc_configuration=RTC_CONFIG,
         async_processing=True
