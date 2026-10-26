@@ -59,6 +59,23 @@ section[data-testid="stSidebar"] * { color: #e8f0fb !important; }
 """
 st.markdown(DARK_BLUE_CSS, unsafe_allow_html=True)
 
+# ===================== 全局 WebRTC 配置 =====================
+RTC_CONFIG = {
+    "iceServers": [
+        {"urls": ["stun:stun.l.google.com:19302"]},
+        {
+            "urls": "turn:openrelay.metered.ca:80",
+            "username": "openrelayproject",
+            "credential": "openrelayproject",
+        },
+        {
+            "urls": "turn:openrelay.metered.ca:443",
+            "username": "openrelayproject",
+            "credential": "openrelayproject",
+        }
+    ]
+}
+
 # ===================== 文件路径 =====================
 USERS_FILE = "users.json"
 PATIENTS_FILE = "patients.json"
@@ -253,7 +270,7 @@ class RealTimeProcessor(VideoProcessorBase):
             min_detection_confidence=0.5,
             min_tracking_confidence=0.5,
         )
-        self.mode = mode # "elbow", "knee", "pushup", "squat"
+        self.mode = mode
         self.side = selected_side
         self.current_angle = 0.0
         self.max_angle = 0.0
@@ -267,6 +284,7 @@ class RealTimeProcessor(VideoProcessorBase):
 
     def recv(self, frame):
         img = frame.to_ndarray(format="bgr24")
+        img = cv2.resize(img, (640, 480))
         img = auto_white_balance(img)
         img_h, img_w = img.shape[:2]
         rgb = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
@@ -275,7 +293,7 @@ class RealTimeProcessor(VideoProcessorBase):
         if results.pose_landmarks:
             landmarks = results.pose_landmarks.landmark
             
-            # 1. 肘关节康复
+            # 1. 肘关节康复 (修复乱码：纯英文+数字)
             if self.mode == "elbow":
                 pts = get_upper_limb_points(landmarks, img_w, img_h, self.side)
                 raw_angle = calculate_raw_angle(pts["shoulder"], pts["elbow"], pts["wrist"])
@@ -283,11 +301,14 @@ class RealTimeProcessor(VideoProcessorBase):
                 if self.current_angle > self.max_angle: self.max_angle = self.current_angle
 
                 draw_single_arm(img, pts)
-                cv2.putText(img, f"{self.current_angle}°", (pts["elbow"][0] + 15, pts["elbow"][1] - 15), cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 0, 255), 2)
-                cv2.putText(img, f"当前: {self.current_angle}°", (20, 40), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 0), 2)
-                cv2.putText(img, f"最大值: {self.max_angle}°", (20, 80), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 0), 2)
+                cv2.putText(img, f"{self.current_angle} deg", (pts["elbow"][0] + 15, pts["elbow"][1] - 15), cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 0, 255), 2)
+                cv2.putText(img, f"Current: {self.current_angle} deg", (20, 40), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 0), 2)
+                cv2.putText(img, f"Max: {self.max_angle} deg", (20, 80), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 0), 2)
+                
+                # 画面里只显示颜色和状态英文，中文在下方显示
                 text, color, _, _ = status_of(self.current_angle)
-                cv2.putText(img, text, (20, 130), cv2.FONT_HERSHEY_SIMPLEX, 0.7, color, 2)
+                status_en = "Normal" if "正常" in text else ("Limited" if "受限" in text else "Over")
+                cv2.putText(img, f"Status: {status_en}", (20, 130), cv2.FONT_HERSHEY_SIMPLEX, 0.7, color, 2)
 
             # 2. 膝关节康复
             elif self.mode == "knee":
@@ -297,13 +318,15 @@ class RealTimeProcessor(VideoProcessorBase):
                 if self.current_angle > self.max_angle: self.max_angle = self.current_angle
 
                 draw_single_leg(img, pts)
-                cv2.putText(img, f"{self.current_angle}°", (pts["knee"][0] + 15, pts["knee"][1] - 15), cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 0, 255), 2)
-                cv2.putText(img, f"当前: {self.current_angle}°", (20, 40), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 0), 2)
-                cv2.putText(img, f"最大值: {self.max_angle}°", (20, 80), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 0), 2)
+                cv2.putText(img, f"{self.current_angle} deg", (pts["knee"][0] + 15, pts["knee"][1] - 15), cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 0, 255), 2)
+                cv2.putText(img, f"Current: {self.current_angle} deg", (20, 40), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 0), 2)
+                cv2.putText(img, f"Max: {self.max_angle} deg", (20, 80), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 0), 2)
+                
                 text, color, _, _ = status_of(self.current_angle)
-                cv2.putText(img, text, (20, 130), cv2.FONT_HERSHEY_SIMPLEX, 0.7, color, 2)
+                status_en = "Normal" if "正常" in text else ("Limited" if "受限" in text else "Over")
+                cv2.putText(img, f"Status: {status_en}", (20, 130), cv2.FONT_HERSHEY_SIMPLEX, 0.7, color, 2)
 
-            # 3. 日常运动：俯卧撑 (侧身)
+            # 3. 俯卧撑
             elif self.mode == "pushup":
                 def get_pt(idx): return [int(landmarks[idx].x * img_w), int(landmarks[idx].y * img_h)]
                 shoulder, elbow, wrist = get_pt(11), get_pt(13), get_pt(15)
@@ -326,7 +349,7 @@ class RealTimeProcessor(VideoProcessorBase):
                 if body_angle < 150 or body_angle > 195:
                     cv2.putText(img, "WARNING: Keep body straight!", (10, 110), cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 0, 255), 2)
 
-            # 4. 日常运动：深蹲 (正面)
+            # 4. 深蹲
             elif self.mode == "squat":
                 def get_pt(idx): return [int(landmarks[idx].x * img_w), int(landmarks[idx].y * img_h)]
                 l_shoulder, r_shoulder = get_pt(11), get_pt(12)
@@ -354,7 +377,6 @@ class RealTimeProcessor(VideoProcessorBase):
                 elif self.stage == "DOWN" and knee_angle > 130:
                      cv2.putText(img, "Go deeper!", (10, 110), cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 165, 255), 2)
 
-            # 统一绘制全身骨架
             self.mp_drawing.draw_landmarks(
                 img, 
                 results.pose_landmarks, 
@@ -505,7 +527,8 @@ def photo_mode(selected_side, joint_type):
         draw_single_leg(img_bgr, pts)
         text_pos = (pts["knee"][0] + 15, pts["knee"][1] - 15)
 
-    cv2.putText(img_bgr, f"{angle}°", text_pos, cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 0, 255), 2)
+    # 改用英文 deg，避免乱码
+    cv2.putText(img_bgr, f"{angle} deg", text_pos, cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 0, 255), 2)
 
     img_show = cv2.cvtColor(cv2.flip(img_bgr, 1), cv2.COLOR_BGR2RGB)
     st.image(img_show, caption="识别结果（镜像预览）", use_container_width=True)
@@ -541,7 +564,8 @@ def video_mode(selected_side, joint_type):
         key=f"{mode_key}-real-time-{selected_side}",
         video_processor_factory=lambda: current_processor,
         media_stream_constraints={"video": True, "audio": False},
-        rtc_configuration={"iceServers": [{"urls": ["stun:stun.l.google.com:19302"]}]},
+        rtc_configuration=RTC_CONFIG,
+        async_processing=True
     )
 
     col1, col2 = st.columns(2)
@@ -639,7 +663,8 @@ def exercise_page():
         key=f"{mode_key}-real-time",
         video_processor_factory=lambda: current_processor,
         media_stream_constraints={"video": True, "audio": False},
-        rtc_configuration={"iceServers": [{"urls": ["stun:stun.l.google.com:19302"]}]},
+        rtc_configuration=RTC_CONFIG,
+        async_processing=True
     )
 
     st.markdown("---")
