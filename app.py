@@ -60,6 +60,7 @@ section[data-testid="stSidebar"] * { color: #e8f0fb !important; }
 st.markdown(DARK_BLUE_CSS, unsafe_allow_html=True)
 
 # ===================== 全局 WebRTC 配置 =====================
+# 增加 TCP 穿透，确保手机或跨网络下能连上
 RTC_CONFIG = {
     "iceServers": [
         {"urls": ["stun:stun.l.google.com:19302"]},
@@ -70,6 +71,11 @@ RTC_CONFIG = {
         },
         {
             "urls": "turn:openrelay.metered.ca:443",
+            "username": "openrelayproject",
+            "credential": "openrelayproject",
+        },
+        {
+            "urls": "turn:openrelay.metered.ca:443?transport=tcp",
             "username": "openrelayproject",
             "credential": "openrelayproject",
         }
@@ -265,8 +271,10 @@ def status_of(angle):
 # ===================== 核心视频处理器 =====================
 class RealTimeProcessor(VideoProcessorBase):
     def __init__(self, mode, selected_side="left"):
+        # 【性能优化 1】model_complexity=0 开启极速模型，极大加快处理速度
         self.pose = mp.solutions.pose.Pose(
             static_image_mode=False,
+            model_complexity=0, 
             min_detection_confidence=0.5,
             min_tracking_confidence=0.5,
         )
@@ -284,7 +292,9 @@ class RealTimeProcessor(VideoProcessorBase):
 
     def recv(self, frame):
         img = frame.to_ndarray(format="bgr24")
-        img = cv2.resize(img, (640, 480))
+        
+        # 【性能优化 2】将进来的画面瞬间压缩到 320x240，运算量降低 80%，告别卡顿
+        img = cv2.resize(img, (320, 240))
         img = auto_white_balance(img)
         img_h, img_w = img.shape[:2]
         rgb = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
@@ -305,7 +315,6 @@ class RealTimeProcessor(VideoProcessorBase):
                 cv2.putText(img, f"Current: {self.current_angle} deg", (20, 40), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 0), 2)
                 cv2.putText(img, f"Max: {self.max_angle} deg", (20, 80), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 0), 2)
                 
-                # 画面里只显示颜色和状态英文，中文在下方显示
                 text, color, _, _ = status_of(self.current_angle)
                 status_en = "Normal" if "正常" in text else ("Limited" if "受限" in text else "Over")
                 cv2.putText(img, f"Status: {status_en}", (20, 130), cv2.FONT_HERSHEY_SIMPLEX, 0.7, color, 2)
@@ -340,14 +349,14 @@ class RealTimeProcessor(VideoProcessorBase):
                     self.stage = "DOWN"
                     self.counter += 1
 
-                cv2.rectangle(img, (0, 0), (250, 80), (245, 117, 16), -1)
-                cv2.putText(img, 'REPS', (15, 20), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0,0,0), 1)
-                cv2.putText(img, str(self.counter), (10, 70), cv2.FONT_HERSHEY_SIMPLEX, 2, (255,255,255), 2)
-                cv2.putText(img, 'STAGE', (110, 20), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0,0,0), 1)
-                if self.stage: cv2.putText(img, self.stage, (105, 70), cv2.FONT_HERSHEY_SIMPLEX, 1.5, (255,255,255), 2)
+                cv2.rectangle(img, (0, 0), (150, 60), (245, 117, 16), -1)
+                cv2.putText(img, 'REPS', (10, 15), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0,0,0), 1)
+                cv2.putText(img, str(self.counter), (10, 50), cv2.FONT_HERSHEY_SIMPLEX, 1.5, (255,255,255), 2)
+                cv2.putText(img, 'STAGE', (80, 15), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0,0,0), 1)
+                if self.stage: cv2.putText(img, self.stage, (75, 50), cv2.FONT_HERSHEY_SIMPLEX, 1.0, (255,255,255), 2)
 
                 if body_angle < 150 or body_angle > 195:
-                    cv2.putText(img, "WARNING: Keep body straight!", (10, 110), cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 0, 255), 2)
+                    cv2.putText(img, "Keep body straight!", (10, 80), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 0, 255), 2)
 
             # 4. 深蹲
             elif self.mode == "squat":
@@ -366,16 +375,16 @@ class RealTimeProcessor(VideoProcessorBase):
                     self.stage = "DOWN"
                     self.counter += 1
 
-                cv2.rectangle(img, (0, 0), (280, 80), (50, 150, 50), -1)
-                cv2.putText(img, 'SQUATS', (15, 20), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255,255,255), 1)
-                cv2.putText(img, str(self.counter), (10, 70), cv2.FONT_HERSHEY_SIMPLEX, 2, (255,255,255), 2)
-                cv2.putText(img, 'STAGE', (130, 20), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255,255,255), 1)
-                if self.stage: cv2.putText(img, self.stage, (125, 70), cv2.FONT_HERSHEY_SIMPLEX, 1.5, (255,255,255), 2)
+                cv2.rectangle(img, (0, 0), (150, 60), (50, 150, 50), -1)
+                cv2.putText(img, 'SQUATS', (10, 15), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255,255,255), 1)
+                cv2.putText(img, str(self.counter), (10, 50), cv2.FONT_HERSHEY_SIMPLEX, 1.5, (255,255,255), 2)
+                cv2.putText(img, 'STAGE', (80, 15), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255,255,255), 1)
+                if self.stage: cv2.putText(img, self.stage, (75, 50), cv2.FONT_HERSHEY_SIMPLEX, 1.0, (255,255,255), 2)
                 
                 if self.stage == "DOWN" and knee_dist < (ankle_dist * 0.8):
-                     cv2.putText(img, "WARNING: Knees caving in!", (10, 110), cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 0, 255), 2)
+                     cv2.putText(img, "Knees caving in!", (10, 80), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 0, 255), 2)
                 elif self.stage == "DOWN" and knee_angle > 130:
-                     cv2.putText(img, "Go deeper!", (10, 110), cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 165, 255), 2)
+                     cv2.putText(img, "Go deeper!", (10, 80), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 165, 255), 2)
 
             self.mp_drawing.draw_landmarks(
                 img, 
@@ -385,6 +394,8 @@ class RealTimeProcessor(VideoProcessorBase):
                 connection_drawing_spec=self.connection_style
             )
 
+        # 处理完后放大回 640x480 以便前端显示清晰
+        img = cv2.resize(img, (640, 480))
         return frame.from_ndarray(img, format="bgr24")
 
     def __del__(self):
@@ -507,7 +518,7 @@ def photo_mode(selected_side, joint_type):
     h, w = img_bgr.shape[:2]
 
     img_rgb_wb = cv2.cvtColor(img_bgr, cv2.COLOR_BGR2RGB)
-    with mp.solutions.pose.Pose(static_image_mode=True, min_detection_confidence=0.5) as pose:
+    with mp.solutions.pose.Pose(static_image_mode=True, model_complexity=0, min_detection_confidence=0.5) as pose:
         res = pose.process(img_rgb_wb)
 
     if not res.pose_landmarks:
@@ -527,7 +538,6 @@ def photo_mode(selected_side, joint_type):
         draw_single_leg(img_bgr, pts)
         text_pos = (pts["knee"][0] + 15, pts["knee"][1] - 15)
 
-    # 改用英文 deg，避免乱码
     cv2.putText(img_bgr, f"{angle} deg", text_pos, cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 0, 255), 2)
 
     img_show = cv2.cvtColor(cv2.flip(img_bgr, 1), cv2.COLOR_BGR2RGB)
@@ -563,7 +573,8 @@ def video_mode(selected_side, joint_type):
     ctx = webrtc_streamer(
         key=f"{mode_key}-real-time-{selected_side}",
         video_processor_factory=lambda: current_processor,
-        media_stream_constraints={"video": True, "audio": False},
+        # 【性能优化 3】限制前端传输的视频分辨率为 320x240，减小网络传输负担
+        media_stream_constraints={"video": {"width": 320, "height": 240}, "audio": False},
         rtc_configuration=RTC_CONFIG,
         async_processing=True
     )
@@ -662,7 +673,8 @@ def exercise_page():
     ctx = webrtc_streamer(
         key=f"{mode_key}-real-time",
         video_processor_factory=lambda: current_processor,
-        media_stream_constraints={"video": True, "audio": False},
+        # 【性能优化 3】限制前端传输的视频分辨率为 320x240
+        media_stream_constraints={"video": {"width": 320, "height": 240}, "audio": False},
         rtc_configuration=RTC_CONFIG,
         async_processing=True
     )
