@@ -257,20 +257,26 @@ def status_of(angle):
         return "⚠️ 轻度屈曲受限", (0, 165, 255), "warning", "轻度受限"
     return "❗ 明显屈曲受限", (0, 0, 255), "error", "明显受限"
 
-# ===================== 核心视频处理器 (新版 Tasks API + 自动下载) =====================
-class RealTimeProcessor(VideoProcessorBase):
-    def __init__(self, mode, selected_side="left"):
-        # 【修复 PermissionError】将模型下载到当前工作目录，避开系统只读目录
-        model_dir = Path(os.getcwd()) / "mp_models"
-        model_dir.mkdir(exist_ok=True) 
-        model_path = model_dir / "pose_landmarker_lite.task"
+# ===================== 辅助：统一模型下载路径 =====================
+def get_model_path():
+    model_dir = Path(os.getcwd()) / "mp_models"
+    model_dir.mkdir(exist_ok=True)
+    model_path = model_dir / "pose_landmarker_lite.task"
 
-        # 如果模型不存在，则从官方拉取（只会在首次启动时执行一次）
-        if not model_path.exists():
-            url = "https://storage.googleapis.com/mediapipe-models/pose_landmarker/pose_landmarker_lite/float16/1/pose_landmarker_lite.task"
+    if not model_path.exists():
+        url = "https://storage.googleapis.com/mediapipe-models/pose_landmarker/pose_landmarker_lite/float16/1/pose_landmarker_lite.task"
+        try:
             with urllib.request.urlopen(url) as response, open(model_path, 'wb') as out_file:
                 out_file.write(response.read())
+        except Exception as e:
+            st.error(f"模型下载失败，请检查网络: {e}")
+    return str(model_path)
 
+# ===================== 核心视频处理器 =====================
+class RealTimeProcessor(VideoProcessorBase):
+    def __init__(self, mode, selected_side="left"):
+        model_path = get_model_path()
+        
         # 初始化新版 Tasks API
         BaseOptions = mp.tasks.BaseOptions
         PoseLandmarker = mp.tasks.vision.PoseLandmarker
@@ -278,7 +284,7 @@ class RealTimeProcessor(VideoProcessorBase):
         VisionRunningMode = mp.tasks.vision.RunningMode
 
         options = PoseLandmarkerOptions(
-            base_options=BaseOptions(model_asset_path=str(model_path)),
+            base_options=BaseOptions(model_asset_path=model_path),
             running_mode=VisionRunningMode.VIDEO,
             num_poses=1
         )
@@ -297,7 +303,7 @@ class RealTimeProcessor(VideoProcessorBase):
     def recv(self, frame):
         img = frame.to_ndarray(format="bgr24")
         
-        # 【性能优化】极低分辨率处理，肉眼看清骨架足够，速度翻倍
+        # 极限降分辨率：320x240
         img = cv2.resize(img, (320, 240))
         img = auto_white_balance(img)
         img_h, img_w = img.shape[:2]
@@ -309,14 +315,11 @@ class RealTimeProcessor(VideoProcessorBase):
         results = self.landmarker.detect_for_video(mp_image, frame_timestamp_ms)
 
         if results.pose_landmarks:
-            # 新版 API 返回的是一个二维数组，取第 0 个人
             landmarks = results.pose_landmarks[0]
             
-            # 1. 肘关节康复
+            # 1. 肘关节
             if self.mode == "elbow":
-                def get_pt(idx): return [int(landmarks[idx].x * img_w), int(landmarks[idx].y * img_h)]
                 pts = get_upper_limb_points(landmarks, img_w, img_h, self.side)
-                # 为了兼容旧版绘图函数，这里直接使用 pts
                 shoulder, elbow, wrist = pts["shoulder"], pts["elbow"], pts["wrist"]
 
                 raw_angle = calculate_raw_angle(shoulder, elbow, wrist)
@@ -332,7 +335,7 @@ class RealTimeProcessor(VideoProcessorBase):
                 status_en = "Normal" if "正常" in text else ("Limited" if "受限" in text else "Over")
                 cv2.putText(img, f"Status: {status_en}", (20, 130), cv2.FONT_HERSHEY_SIMPLEX, 0.7, color, 2)
 
-            # 2. 膝关节康复
+            # 2. 膝关节
             elif self.mode == "knee":
                 pts = get_lower_limb_points(landmarks, img_w, img_h, self.side)
                 hip, knee, ankle = pts["hip"], pts["knee"], pts["ankle"]
@@ -399,7 +402,7 @@ class RealTimeProcessor(VideoProcessorBase):
                 elif self.stage == "DOWN" and knee_angle > 130:
                      cv2.putText(img, "Go deeper!", (10, 80), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 165, 255), 2)
 
-            # 绘制骨架连线（兼容旧版绘制方式）
+            # 绘制骨架连线
             landmarks_proto = mp.framework.formats.landmark_pb2.LandmarkList()
             for lm in landmarks:
                 landmark = landmarks_proto.landmark.add()
@@ -534,23 +537,37 @@ def photo_mode(selected_side, joint_type):
     img_bgr = auto_white_balance(img_bgr)
     h, w = img_bgr.shape[:2]
 
-    # 【注意】拍照模式依然使用旧版 API 以保持代码精简，因为单张照片不存在卡顿和权限问题
-    img_rgb_wb = cv2.cvtColor(img_bgr, cv2.COLOR_BGR2RGB)
-    with mp.solutions.pose.Pose(static_image_mode=True, model_complexity=0, min_detection_confidence=0.5) as pose:
-        res = pose.process(img_rgb_wb)
+    model_path = get_model_path()
+
+    BaseOptions = mp.tasks.BaseOptions
+    PoseLandmarker = mp.tasks.vision.PoseLandmarker
+    PoseLandmarkerOptions = mp.tasks.vision.PoseLandmarkerOptions
+    VisionRunningMode = mp.tasks.vision.RunningMode
+
+    options = PoseLandmarkerOptions(
+        base_options=BaseOptions(model_asset_path=model_path),
+        running_mode=VisionRunningMode.IMAGE
+    )
+
+    with PoseLandmarker.create_from_options(options) as landmarker:
+        rgb_img = cv2.cvtColor(img_bgr, cv2.COLOR_BGR2RGB)
+        mp_image = mp.Image(image_format=mp.ImageFormat.SRGB, data=rgb_img)
+        res = landmarker.detect(mp_image)
 
     if not res.pose_landmarks:
         st.error("未识别到人体关键点，请摆正姿势，完整入镜")
         return
 
+    landmarks = res.pose_landmarks[0]
+
     if joint_type == "肘关节":
-        pts = get_upper_limb_points(res.pose_landmarks.landmark, w, h, selected_side)
+        pts = get_upper_limb_points(landmarks, w, h, selected_side)
         raw_angle = calculate_raw_angle(pts["shoulder"], pts["elbow"], pts["wrist"])
         angle = raw_to_flexion(raw_angle)
         draw_single_arm(img_bgr, pts)
         text_pos = (pts["elbow"][0] + 15, pts["elbow"][1] - 15)
     else:
-        pts = get_lower_limb_points(res.pose_landmarks.landmark, w, h, selected_side)
+        pts = get_lower_limb_points(landmarks, w, h, selected_side)
         raw_angle = calculate_raw_angle(pts["hip"], pts["knee"], pts["ankle"])
         angle = raw_to_flexion(raw_angle)
         draw_single_leg(img_bgr, pts)
